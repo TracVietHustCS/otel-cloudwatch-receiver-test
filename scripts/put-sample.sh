@@ -5,8 +5,8 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1            # Git Bash trên Windows: không đổi /otel-cw-test thành đường dẫn Windows
 export AWS_CLI_FILE_ENCODING=UTF-8   # có tiếng Hàn trong file JSON
 G=/otel-cw-test; S=test-stream
-region="${AWS_REGION:?hãy đặt AWS_REGION}"
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."; [ -f .env ] && { set -a; . ./.env; set +a; }; cd scripts
+region="${AWS_REGION:?hãy đặt AWS_REGION (trong .env)}"
 
 aws logs create-log-group  --log-group-name "$G" --region "$region" 2>/dev/null || true
 aws logs create-log-stream --log-group-name "$G" --log-stream-name "$S" --region "$region" 2>/dev/null || true

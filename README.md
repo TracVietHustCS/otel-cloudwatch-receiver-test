@@ -9,7 +9,10 @@ Chỉ có 1 service Collector, kết quả ghi ra file trong `./out/`.
 docker-compose.yml
 config/config.yaml            <- cấu hình thô  -> out/logs.jsonl
 config/config-transform.yaml  <- có transform  -> out/logs-transformed.jsonl
+scripts/setup.sh              <- kiểm tra key/quyền, tạo log group + stream
 scripts/put-sample.sh         <- sinh 4 event mẫu lên CloudWatch
+scripts/run.sh                <- chạy Collector bằng Docker (raw | transform)
+scripts/cleanup.sh            <- dọn dẹp (cần --yes)
 scripts/sample-events.template.json
 ```
 
@@ -50,6 +53,21 @@ Dùng SSO thay vì key dài hạn: `aws sso login --profile <p>` rồi
 
 Quyền IAM cần: `logs:FilterLogEvents` (Collector); `logs:CreateLogGroup`, `logs:CreateLogStream`,
 `logs:PutLogEvents`, `logs:DeleteLogGroup` (tạo/ghi/xóa log mẫu). Chỉ dùng log group `/otel-cw-test`.
+
+## Cách nhanh (dùng script)
+
+Sau khi điền `.env` (mục 1), các script tự đọc `.env`, không cần `source` thủ công:
+
+```bash
+scripts/setup.sh                 # kiểm tra key + quyền đọc, tạo log group/stream
+scripts/put-sample.sh            # sinh 4 event mẫu (chạy lại để thêm 4 event nữa)
+scripts/run.sh raw               # chạy Collector bản thô      -> out/logs.jsonl
+scripts/run.sh transform         # chạy Collector bản transform -> out/logs-transformed.jsonl
+scripts/cleanup.sh --yes         # dọn: docker down, xóa out/data và log group (thêm --env để xóa cả .env)
+```
+
+`run.sh` mặc định chạy mới hoàn toàn (xóa checkpoint `./data` và file output cũ); thêm `--keep` để giữ checkpoint.
+`cleanup.sh` không có `--yes` thì chỉ in kế hoạch. Các mục 2 đến 6 bên dưới là lệnh tay tương đương, kèm output mẫu.
 
 ## 2. Kiểm tra quyền đọc (làm đầu tiên)
 
