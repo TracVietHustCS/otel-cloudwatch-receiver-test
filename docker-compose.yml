@@ -1,0 +1,10 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION:-0.130.0}
+    user: "0:0"
+    command: ["--config=/etc/otelcol/config/${OTEL_CONFIG:-config.yaml}"]
+    env_file: .env
+    volumes:
+      - ./config:/etc/otelcol/config:ro
+      - ./out:/out
+      - ./data:/var/lib/otelcol/storage

@@ -1,0 +1,55 @@
+# Như config.yaml + processor transform (OTTL) để ra đúng cấu trúc OTLP như Fluent Bit.
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+
+receivers:
+  awscloudwatch:
+    region: ${env:AWS_REGION}
+    storage: file_storage
+    logs:
+      poll_interval: 30s
+      groups:
+        named:
+          /otel-cw-test:
+            names: [test-stream]
+
+processors:
+  transform:
+    error_mode: propagate
+    log_statements:
+      - context: log
+        statements:
+          # 1. tách dòng loguru: time | level | logger | extra - message
+          - 'merge_maps(attributes, ExtractPatterns(body.string, "^(?P<time>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}) \\| (?P<level>\\w+)\\s+\\| (?P<logger>[^|]+?)\\s*\\| (?P<extra>\\{.*?\\}) - (?P<message>[\\s\\S]*?)\\s*\\z"), "upsert") where IsMatch(body.string, "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\| \\w+\\s+\\| ")'
+          # 2. severity và body
+          - 'set(severity_text, attributes["level"]) where attributes["level"] != nil'
+          - 'set(body, attributes["message"]) where attributes["message"] != nil'
+          # 3. status_code và event (chỉ khi có)
+          - 'merge_maps(attributes, ExtractPatterns(body.string, "상태코드: (?P<status_code>\\d+)"), "upsert") where IsMatch(body.string, "상태코드: \\d+")'
+          - 'merge_maps(attributes, ExtractPatterns(body.string, "^(?P<event>요청 시작|요청 완료|사용자 인증 성공)"), "upsert") where IsMatch(body.string, "^(요청 시작|요청 완료|사용자 인증 성공)")'
+          # 4. source, host từ resource attributes
+          - 'set(attributes["source"], "devai-backend-service") where resource.attributes["cloudwatch.log.group.name"] == "/otel-cw-test"'
+          - 'set(attributes["host"], resource.attributes["cloudwatch.log.stream"])'
+          # 5. bỏ level, message, time (KHÔNG xóa extra)
+          - 'delete_key(attributes, "level")'
+          - 'delete_key(attributes, "message")'
+          - 'delete_key(attributes, "time")'
+  batch: {}
+
+exporters:
+  file:
+    path: /out/logs-transformed.jsonl
+    flush_interval: 1s
+    append: true   # giữ file khi restart (mặc định exporter sẽ ghi đè)
+  debug:
+    verbosity: detailed
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [awscloudwatch]
+      processors: [transform, batch]
+      exporters: [file, debug]

@@ -1,0 +1,35 @@
+# Cấu hình thô: kéo log từ CloudWatch, ghi nguyên văn ra file.
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+
+receivers:
+  awscloudwatch:
+    region: ${env:AWS_REGION}
+    storage: file_storage
+    logs:
+      poll_interval: 30s
+      groups:
+        named:
+          /otel-cw-test:
+            names: [test-stream]
+
+processors:
+  batch: {}
+
+exporters:
+  file:
+    path: /out/logs.jsonl
+    flush_interval: 1s
+    append: true   # giữ file khi restart (mặc định exporter sẽ ghi đè)
+  debug:
+    verbosity: detailed
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [awscloudwatch]
+      processors: [batch]
+      exporters: [file, debug]

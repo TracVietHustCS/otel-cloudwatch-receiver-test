@@ -1,0 +1,6 @@
+[
+  {"timestamp": __TS0__, "message": "2026-08-27 21:22:58.688 | INFO     | app.main:log_requests:362 | {} - 요청 완료 - 10.1.2.3 - admin - GET /api/v1/projects - 상태코드: 200 - 처리시간: 0.011초"},
+  {"timestamp": __TS1__, "message": "2026-08-27 21:22:59.120 | WARNING  | app.services.auth:verify_token:88 | {} - 토큰 만료 임박 - 사용자: admin"},
+  {"timestamp": __TS2__, "message": "2026-08-27 21:23:00.001 | INFO     | app.services.project:create:41 | {'request_id': 'abc123'} - 프로젝트 생성 완료 - id: 7"},
+  {"timestamp": __TS3__, "message": "2026-08-27 21:23:01.500 | ERROR    | app.main:handler:120 | {} - 처리 중 오류 발생\nTraceback (most recent call last):\n  File \"/app/app/main.py\", line 118, in handler\n    result = 1 / 0\nZeroDivisionError: division by zero"}
+]
