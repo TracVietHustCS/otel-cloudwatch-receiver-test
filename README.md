@@ -1,81 +1,181 @@
 # otel-cw-test
 
-Stack tối giản để kiểm tra 2 việc, chỉ với 1 service Collector (không Elasticsearch, không Fluent Bit):
+Kiểm tra OpenTelemetry Collector (`otel/opentelemetry-collector-contrib:0.130.0`) có:
+**(A)** kéo được log từ AWS CloudWatch Logs, và **(B)** biến log loguru thành đúng cấu trúc OTLP như Fluent Bit.
+Chỉ có 1 service Collector, kết quả ghi ra file trong `./out/`.
 
-- **A.** OpenTelemetry Collector kéo được log từ AWS CloudWatch Logs không.
-- **B.** Collector biến đổi (enrich) log loguru của `devai-backend-service` thành đúng cấu trúc OTLP như Fluent Bit.
+```
+.env                          <- ĐẶT KEY AWS Ở ĐÂY (không commit)
+docker-compose.yml
+config/config.yaml            <- cấu hình thô  -> out/logs.jsonl
+config/config-transform.yaml  <- có transform  -> out/logs-transformed.jsonl
+scripts/put-sample.sh         <- sinh 4 event mẫu lên CloudWatch
+scripts/sample-events.template.json
+```
 
-Image mặc định: `otel/opentelemetry-collector-contrib:0.130.0` (đổi bằng `OTEL_VERSION`).
-Kết quả test nằm ở [FINDINGS.md](FINDINGS.md).
+> Đã chạy thử config + OTTL bằng binary 0.130.0 với endpoint CloudWatch **giả**: 4 dòng mẫu (a)-(d) ra đúng cấu trúc đích.
+> **Chưa chạy** với AWS thật và chưa chạy bằng Docker: output ở các bước dưới là ví dụ, bạn tự kiểm tra.
 
-> **Trạng thái:** config và OTTL đã chạy thật bằng binary `otelcol-contrib 0.130.0` với endpoint CloudWatch **giả**
-> (không phải AWS thật). **CHƯA chạy:** `docker compose`, AWS thật, kiểm tra quyền, `put-sample.sh`/`cleanup.sh` với AWS.
-> Chi tiết ở FINDINGS.md.
+## 0. Yêu cầu
 
-## Yêu cầu
+Docker + Compose v2, AWS CLI v2. Windows: dùng Git Bash và chạy `export MSYS_NO_PATHCONV=1` trước.
 
-Docker + Compose v2, AWS CLI v2, một credential AWS có quyền ghi/đọc CloudWatch Logs.
-Quyền cần: Collector `logs:FilterLogEvents`; script mẫu `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DeleteLogGroup`.
-Chỉ dùng log group `/otel-cw-test`. Trên Git Bash (Windows) chạy `export MSYS_NO_PATHCONV=1` trước.
+## 1. Đặt key AWS vào đâu
 
-## 1. Kiểm tra quyền (làm đầu tiên)
+Tạo file `.env` ở thư mục gốc repo (cùng cấp `docker-compose.yml`):
+
+```bash
+cp .env.example .env
+```
+
+Mở `.env`, sửa 3 dòng (thêm dòng thứ 4 nếu dùng credential tạm / SSO):
+
+```
+AWS_REGION=ap-northeast-2
+AWS_ACCESS_KEY_ID=AKIA...............
+AWS_SECRET_ACCESS_KEY=....................
+# AWS_SESSION_TOKEN=....        (chỉ khi credential tạm; bỏ dấu # đầu dòng)
+```
+
+- Docker đọc `.env` này và truyền cho Collector. Collector không có ô nhập key, nó dùng chuỗi credential mặc định của AWS SDK.
+- Các lệnh `aws` chạy trên máy bạn **không** tự đọc `.env`. Nạp key vào shell hiện tại bằng:
+
+```bash
+set -a; source .env; set +a
+aws sts get-caller-identity      # in ra Account / Arn = key dùng được
+```
+
+Dùng SSO thay vì key dài hạn: `aws sso login --profile <p>` rồi
+`aws configure export-credentials --profile <p> --format env-no-export >> .env` (key tạm sẽ hết hạn).
+
+Quyền IAM cần: `logs:FilterLogEvents` (Collector); `logs:CreateLogGroup`, `logs:CreateLogStream`,
+`logs:PutLogEvents`, `logs:DeleteLogGroup` (tạo/ghi/xóa log mẫu). Chỉ dùng log group `/otel-cw-test`.
+
+## 2. Kiểm tra quyền đọc (làm đầu tiên)
 
 ```bash
 aws logs filter-log-events --region $AWS_REGION --log-group-name "/otel-cw-test" --limit 1
 ```
 
-- In ra JSON (kể cả `events: []`) = có quyền.
-- `AccessDeniedException` = thiếu quyền (tên action nằm trong lỗi). **Dừng lại** và xin thêm quyền đó.
-- `ResourceNotFoundException` = sai tên group hoặc region (hoặc chưa chạy bước 2.2).
+| Output | Ý nghĩa |
+|---|---|
+| JSON, kể cả `{"events": [], ...}` | Có quyền đọc |
+| `AccessDeniedException` ... `logs:FilterLogEvents` | Thiếu quyền, dừng lại và xin thêm (tên action nằm trong lỗi) |
+| `ResourceNotFoundException` | Chưa có log group (chạy bước 3) hoặc sai tên/region |
 
-## 2. Các bước chạy
+## 3. Tạo log group, stream và sinh log
 
 ```bash
-cp .env.example .env            # điền AWS_REGION và credential (không commit)
-export AWS_REGION=ap-northeast-2
-scripts/put-sample.sh           # 2.2: tạo group/stream và ghi 4 event mẫu (a)-(d)
-docker compose up -d            # config thô -> out/logs.jsonl (đợi ~30s)
-docker compose logs -f otel-collector
+aws logs create-log-group  --log-group-name /otel-cw-test --region $AWS_REGION
+aws logs create-log-stream --log-group-name /otel-cw-test --log-stream-name test-stream --region $AWS_REGION
+```
+(không in gì khi thành công; `ResourceAlreadyExistsException` nghĩa là đã có sẵn, bỏ qua.)
+
+Sinh 4 event mẫu (a) request, (b) WARNING, (c) có `extra` khác rỗng, (d) ERROR nhiều dòng:
+
+```bash
+scripts/put-sample.sh
+```
+Output: `đã ghi 4 event vào /otel-cw-test / test-stream (timestamp gốc 1794...)`.
+Chạy lại lệnh này bao nhiêu lần cũng được, mỗi lần thêm 4 event mới (timestamp = giờ hiện tại).
+
+Kiểm tra log đã vào CloudWatch:
+
+```bash
+aws logs filter-log-events --region $AWS_REGION --log-group-name /otel-cw-test --limit 4 --query 'events[].message' --output text
 ```
 
-Chạy bản transform (ghi `out/logs-transformed.jsonl`):
+## 4. Chạy Collector, bản thô
 
 ```bash
-docker compose down && rm -rf data/*     # xóa checkpoint để đọc lại từ đầu
+docker compose up -d
+docker compose logs -f otel-collector      # Ctrl+C để thoát; đợi ~30s (poll_interval)
+```
+
+Sau ~30s, file `out/logs.jsonl` xuất hiện:
+
+```bash
+cat out/logs.jsonl
+```
+
+Mỗi event là một logRecord, **body là cả dòng thô**, chưa có `severityText`. Ví dụ rút gọn:
+
+```json
+{"resourceLogs":[{"resource":{"attributes":[
+  {"key":"aws.region","value":{"stringValue":"ap-northeast-2"}},
+  {"key":"cloudwatch.log.group.name","value":{"stringValue":"/otel-cw-test"}},
+  {"key":"cloudwatch.log.stream","value":{"stringValue":"test-stream"}}]},
+ "scopeLogs":[{"scope":{},"logRecords":[{
+  "timeUnixNano":"1794469583860000000","observedTimeUnixNano":"1794469613985672221",
+  "body":{"stringValue":"2026-08-27 21:22:58.688 | INFO     | app.main:log_requests:362 | {} - 요청 완료 - ... 상태코드: 200 - ..."},
+  "attributes":[{"key":"id","value":{"stringValue":"<event id CloudWatch>"}}]}]}]}]}
+```
+
+`timeUnixNano` = giờ event trong CloudWatch, `observedTimeUnixNano` = giờ Collector poll.
+
+## 5. Chạy bản transform (đúng cấu trúc Fluent Bit)
+
+Checkpoint nằm trong `./data`; xóa đi để đọc lại từ đầu:
+
+```bash
+docker compose down
+rm -rf data
 OTEL_CONFIG=config-transform.yaml docker compose up -d
+sleep 35 && cat out/logs-transformed.jsonl
 ```
 
-Lưu ý: checkpoint nằm ở `./data`. Đổi config mà không xóa `data/*` thì collector chỉ đọc event **mới**.
-Mỗi lần chạy lại `put-sample.sh` thêm đúng 4 event mới.
+Kết quả mong đợi cho dòng (a) (đã chạy thật với endpoint giả; `id` thật của CloudWatch dài hơn):
 
-Tùy chọn (T8), lấy `timeUnixNano` từ giờ trong dòng loguru (KST): thêm câu này vào `config-transform.yaml`,
+```json
+{"severityText":"INFO",
+ "body":{"stringValue":"요청 완료 - 10.1.2.3 - admin - GET /api/v1/projects - 상태코드: 200 - 처리시간: 0.011초"},
+ "attributes":[
+  {"key":"id","value":{"stringValue":"<event id>"}},
+  {"key":"event","value":{"stringValue":"요청 완료"}},
+  {"key":"host","value":{"stringValue":"test-stream"}},
+  {"key":"logger","value":{"stringValue":"app.main:log_requests:362"}},
+  {"key":"extra","value":{"stringValue":"{}"}},
+  {"key":"source","value":{"stringValue":"devai-backend-service"}},
+  {"key":"status_code","value":{"stringValue":"200"}}]}
+```
+
+Các dòng còn lại: (b) `severityText` `WARNING`, không có `status_code`/`event`; (c) `extra` = `{'request_id': 'abc123'}`;
+(d) một record `ERROR`, body giữ nguyên các dòng traceback (`\n`). Không còn attribute `level`, `message`, `time`.
+
+Xem nhanh các trường chính (cần python3):
+
+```bash
+python3 - <<'PY'
+import json
+for line in open('out/logs-transformed.jsonl', encoding='utf-8'):
+    for rl in json.loads(line)['resourceLogs']:
+        for lr in rl['scopeLogs'][0]['logRecords']:
+            a = {x['key']: x['value']['stringValue'] for x in lr['attributes']}
+            print(lr.get('severityText'), '|', a.get('logger'), '|', a.get('extra'), '|', a.get('status_code'), '|', a.get('event'))
+PY
+```
+
+Tùy chọn: lấy `timeUnixNano` từ giờ trong dòng loguru (KST). Thêm câu sau vào `config/config-transform.yaml`,
 ngay trước câu `delete_key(attributes, "level")`:
 
 ```yaml
           - 'set(time, Time(Concat([attributes["time"], " +0900"], ""), "%Y-%m-%d %H:%M:%S.%L %z")) where attributes["time"] != nil'
 ```
 
-## 3. Bảng test
-
-Kết quả chi tiết và bằng chứng trong FINDINGS.md. "Sandbox" = binary 0.130.0 + endpoint CloudWatch giả; "AWS thật" = chưa chạy.
-
-| Test | Nội dung | Sandbox | AWS thật |
-|---|---|---|---|
-| T1 | Kéo đủ 4 event sau ~30s, config thô: body là dòng thô, không có severityText | PASS | CHƯA chạy |
-| T2 | Resource attributes aws.region / group / stream | PASS | CHƯA chạy |
-| T3 | `timeUnixNano` = giờ event, `observedTimeUnixNano` = giờ poll | PASS | CHƯA chạy |
-| T4 | Chạy lại put-sample: đúng 4 record mới, không lặp | PASS | CHƯA chạy |
-| T5 | Restart: không đọc lại từ đầu | PASS | CHƯA chạy |
-| T6 | Event (d) là MỘT record, còn nguyên `\n` | PASS | CHƯA chạy |
-| T7 | So từng record (a)-(d) với cấu trúc đích | PASS (0 lệch) | CHƯA chạy |
-| T8 | Timestamp lấy từ dòng loguru (KST) | PASS | CHƯA chạy |
-| T9 | Endpoint hỏng: collector có panic không | PASS (không panic) | CHƯA chạy |
-
-## 4. Dọn dẹp
+## 6. Dọn dẹp
 
 ```bash
-scripts/cleanup.sh          # chỉ in kế hoạch
-scripts/cleanup.sh --yes    # xóa log group /otel-cw-test
-docker compose down         # dừng collector
-rm -rf out/* data/* .env    # xóa tay nếu muốn (script không tự xóa)
+docker compose down
+rm -rf out data
+aws logs delete-log-group --log-group-name /otel-cw-test --region $AWS_REGION
+aws logs describe-log-groups --log-group-name-prefix /otel-cw-test --region $AWS_REGION   # phải ra "logGroups": []
+rm .env
 ```
+
+## Lưu ý
+
+- Checkpoint (`./data`) lưu vị trí đã đọc, restart không đọc lại. Xóa `data` khi muốn đọc lại từ đầu.
+- Container chạy bằng root nên trên Linux `out/` và `data/` thuộc root: dùng `sudo rm -rf out data`.
+- Exporter `file` đã bật `append: true` để restart không ghi đè file.
+- Receiver không nối dòng multiline: nếu agent gửi từng dòng riêng lên CloudWatch thì Collector không nối lại.
+- `source` đang gán cứng cho group `/otel-cw-test`; group khác cần thêm điều kiện tương ứng.
